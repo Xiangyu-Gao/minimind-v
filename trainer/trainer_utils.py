@@ -6,6 +6,7 @@ import random
 import math
 import numpy as np
 import torch
+import gc
 import torch.distributed as dist
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer

@@ -124,9 +124,10 @@ def main():
             inputs = tokenizer(inputs_text, return_tensors="pt", truncation=True).to(
                 args.device
             )
+            clean_prompt = prompt.replace("\n", "\\n")
 
             print(f"[图像]: {image_file}")
-            print(f'👶: {prompt.replace('\n', '\\n')}')
+            print(f"👶: {clean_prompt}")
             print("🤖️: ", end="")
             model.generate(
                 inputs=inputs["input_ids"],
