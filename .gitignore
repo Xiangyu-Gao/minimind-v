@@ -3,3 +3,10 @@ out
 website/
 docs-minimind-v/
 测试.py
+*.pyc
+dataset/
+checkpoints/
+MiniMind2-V
+model/vision_model
+ckpt_store/
+*.csv
