@@ -24,7 +24,9 @@ from trainer.trainer_utils import (
     setup_seed,
     init_vlm_model,
     vlm_checkpoint,
+    collate_fn,
     SkipBatchSampler,
+    BucketedSkipBatchSampler,
 )
 
 warnings.filterwarnings("ignore")
@@ -144,11 +146,21 @@ if __name__ == "__main__":
         "--max_seq_len", default=1536, type=int, help="训练的最大截断长度"
     )
     parser.add_argument(
+        "--max_num_images", default=1, type=int, help="训练的最大图像数量"
+    )
+    parser.add_argument(
         "--use_moe",
         default=0,
         type=int,
         choices=[0, 1],
         help="是否使用MoE架构（0=否，1=是）",
+    )
+    parser.add_argument(
+        "--use_bucketed_sampler",
+        default=0,
+        type=int,
+        choices=[0, 1],
+        help="是否使用BucketedSampler（0=否，1=是）",
     )
     parser.add_argument(
         "--data_path",
@@ -191,6 +203,9 @@ if __name__ == "__main__":
         num_hidden_layers=args.num_hidden_layers,
         max_seq_len=args.max_seq_len,
         use_moe=bool(args.use_moe),
+        image_special_token="@"
+        * 196
+        * args.max_num_images,  # this was changed to support multiple images
     )
     ckp_data = (
         vlm_checkpoint(vlm_config, weight=args.save_weight, save_dir="../checkpoints")
@@ -230,6 +245,7 @@ if __name__ == "__main__":
         max_length=vlm_config.max_seq_len,
     )
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
+    train_nfs = train_ds.collect_number_of_images()  # 获取训练集中每个样本的图像数量
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == "float16"))
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
 
@@ -251,26 +267,49 @@ if __name__ == "__main__":
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
         if epoch == start_epoch and start_step > 0:  # 第一个epoch且存在检查点
-            batch_sampler = SkipBatchSampler(
-                train_sampler or range(len(train_ds)), args.batch_size, start_step + 1
-            )
+            if not args.use_bucketed_sampler:
+                batch_sampler = SkipBatchSampler(
+                    train_sampler or range(len(train_ds)),
+                    args.batch_size,
+                    start_step + 1,
+                )
+            else:
+                batch_sampler = BucketedSkipBatchSampler(
+                    train_sampler or range(len(train_ds)),
+                    train_nfs,
+                    args.batch_size,
+                    start_step + 1,
+                )
             loader = DataLoader(
                 train_ds,
                 batch_sampler=batch_sampler,
                 num_workers=args.num_workers,
                 pin_memory=True,
+                collate_fn=collate_fn,
             )
             Logger(
                 f"Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始"
             )
             train_epoch(epoch, loader, len(loader) + start_step + 1, start_step, wandb)
         else:  # 默认从头开始
-            loader = DataLoader(
-                train_ds,
-                batch_size=args.batch_size,
-                shuffle=(train_sampler is None),
-                sampler=train_sampler,
-                num_workers=args.num_workers,
-                pin_memory=True,
-            )
+            if not args.use_bucketed_sampler:
+                loader = DataLoader(
+                    train_ds,
+                    batch_size=args.batch_size,
+                    shuffle=(train_sampler is None),
+                    sampler=train_sampler,
+                    num_workers=args.num_workers,
+                    pin_memory=True,
+                )
+            else:
+                batch_sampler = BucketedSkipBatchSampler(
+                    train_sampler or range(len(train_ds)), train_nfs, args.batch_size
+                )
+                loader = DataLoader(
+                    train_ds,
+                    batch_sampler=batch_sampler,
+                    num_workers=args.num_workers,
+                    pin_memory=True,
+                    collate_fn=collate_fn,
+                )
             train_epoch(epoch, loader, len(loader), 0, wandb)

@@ -11,6 +11,7 @@ import torch.distributed as dist
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer
 from model.model_vlm import MiniMindVLM
+from collections import defaultdict
 
 
 def is_main_process():
@@ -187,3 +188,74 @@ class SkipBatchSampler(Sampler):
     def __len__(self):
         total_batches = (len(self.sampler) + self.batch_size - 1) // self.batch_size
         return max(0, total_batches - self.skip_batches)
+
+
+class BucketedSkipBatchSampler(Sampler):
+    """
+    Bucketed sampler that groups examples by number-of-frames buckets into fixed-size batches.
+    """
+
+    def __init__(self, sampler, nfs, batch_size, skip_batches=0):
+        # sampler: an iterable of indices (e.g., DistributedSampler) or None -> use range(len(nfs))
+        self.sampler = (
+            list(sampler)
+            if sampler is not None
+            and not isinstance(sampler, int)
+            and hasattr(sampler, "__iter__")
+            else None
+        )
+        self.nfs = nfs
+        self.batch_size = batch_size
+        self.skip_batches = int(skip_batches)
+
+        # build buckets from the provided ordering of indices
+        indices = self.sampler if self.sampler is not None else list(range(len(nfs)))
+        self.buckets = defaultdict(list)
+        for idx in indices:
+            nf = nfs[idx]
+            bucket_id = assign_bucket(nf)
+            self.buckets[bucket_id].append(idx)
+
+        self.batches = self._create_batches()
+
+    def _create_batches(self):
+        batches = []
+        for bucket, indices in self.buckets.items():
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i : i + self.batch_size]
+                if len(batch) == self.batch_size:
+                    batches.append(batch)
+        return batches
+
+    def __iter__(self):
+        skipped = 0
+        for batch in self.batches:
+            if skipped < self.skip_batches:
+                skipped += 1
+                continue
+            yield batch
+
+    def __len__(self):
+        total = len(self.batches) - self.skip_batches
+        return max(0, total)
+
+
+def assign_bucket(num_frames):
+    if num_frames == 1:
+        return "image"
+    elif num_frames <= 8:
+        return "video_short"
+    elif num_frames <= 16:
+        return "video_mid"
+    else:
+        return "video_long"
+
+
+# Custom collate to avoid DataLoader default_collate storage resize issue
+def collate_fn(batch):
+    # batch is a list of tuples: (X, Y, loss_mask, pixel_values)
+    X = torch.stack([item[0] for item in batch], dim=0)
+    Y = torch.stack([item[1] for item in batch], dim=0)
+    loss_mask = torch.stack([item[2] for item in batch], dim=0)
+    pixel_values = torch.stack([item[3] for item in batch], dim=0)
+    return X, Y, loss_mask, pixel_values

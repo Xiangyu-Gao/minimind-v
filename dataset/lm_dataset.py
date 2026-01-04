@@ -76,6 +76,25 @@ class VLMDataset(Dataset):
                 i += 1
         return loss_mask
 
+    def _get_number_of_images(self, sample):
+        """
+        Get the number of images from a sample
+        """
+        image_paths = sample.get("image", "")
+        if not image_paths:
+            return 0
+        return len([p for p in image_paths.split(",") if p.strip()])
+
+    def collect_number_of_images(self):
+        """
+        Collect the number of images for each sample in the dataset. Return a dict.
+        """
+        num_images_dict = {}  # key: sample index, value: number of images
+        for i, sample in enumerate(self.samples):
+            num_images = self._get_number_of_images(sample)
+            num_images_dict[i] = num_images
+        return num_images_dict
+
     def __getitem__(self, index: int):
         sample = self.samples[index]
         image_paths = sample["image"]
