@@ -20,3 +20,7 @@ class Keys(str, Enum):
     score = "score"
     probability = "probability"
     correct = "correct"
+    # Additional metrics
+    bleu = "bleu"
+    meteor = "meteor"
+    cider = "cider"

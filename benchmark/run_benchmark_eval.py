@@ -14,6 +14,7 @@ from PIL import Image
 from trainer.trainer_utils import setup_seed
 from model.model_vlm import MiniMindVLM, VLMConfig
 from benchmark.evaluate import evaluate
+from scripts.utils import safe_translate
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 
@@ -153,7 +154,28 @@ def main():
         type=str,
         help="运行设备",
     )
+    parser.add_argument(
+        "--language",
+        default="english",
+        type=str,
+        choices=["english", "chinese"],
+        help="输出语言（english=英文，chinese=中文），默认英文以匹配LingoQA基准测试",
+    )
     args = parser.parse_args()
+
+    # Initialize translator if needed for language conversion
+    translator = None
+    if args.language == "english":
+        try:
+            from googletrans import Translator
+
+            translator = Translator()
+            print("Translator initialized for Chinese -> English conversion")
+        except ImportError:
+            print(
+                "Warning: googletrans not installed. Run: pip install googletrans==4.0.0-rc1"
+            )
+            print("Predictions will be kept in their original language.")
 
     model, tokenizer, preprocess = init_model(args)
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
@@ -197,7 +219,7 @@ def main():
         clean_prompt = prompt.replace("\n", "\\n")
         print(f"👶: {clean_prompt}")
         print("🤖️: ", end="")
-        # Run generation and decode the resulting token ids to text (Chinese)
+        # Run generation and decode the resulting token ids to text
         output_ids = model.generate(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
@@ -215,6 +237,11 @@ def main():
         # Decode ONLY the newly generated tokens
         generated_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        # Translate response if language is set to English
+        if args.language == "english" and translator is not None:
+            response = safe_translate(translator, response, src="zh-cn", dest="en")
+            print(f"📝 Translated to English: {response}\n")
 
         question_id = mapping_data[idx]["question_id"]
         segment_id = mapping_data[idx]["segment_id"]
@@ -244,7 +271,7 @@ def main():
     print(f"Predictions saved to {predictions_csv_path}")
 
     # Evaluate the predictions (call the click-wrapped function's callback directly)
-    evaluate.callback(predictions_csv_path, 16)
+    evaluate.callback(predictions_csv_path, 16, True)
 
 
 if __name__ == "__main__":

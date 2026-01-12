@@ -6,6 +6,13 @@ python train_sft_vlm.py --save_weight sft_vlm_v1 --max_num_images 5 --use_bucket
 ```
 
 Evaluate model
+
+SFT model with mutiple images as input
 ```
 python run_benchmark_eval.py --weight sft_vlm_v1
+```
+
+Pretrin model with single image as input
+```
+python ./run_benchmark_eval.py --weight pretrain_vlm_v1 --use_single_image 1
 ```

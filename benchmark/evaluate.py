@@ -6,20 +6,30 @@ from datasets import Dataset
 from functools import partial
 from constants import LINGOQA_TEST, Keys
 from judge import LingoJudge
+from additional_metrics import AdditionalMetrics
 
 
 @click.command()
 @click.option("--predictions_path", help="Path to predictions file.")
 @click.option("--batch_size", help="Batch size for evaluation.", default=1)
-def evaluate(predictions_path: str, batch_size: int) -> float:
+@click.option(
+    "--use_additional_metrics",
+    help="Compute BLEU, METEOR, and CIDEr in addition to Lingo-Judge.",
+    is_flag=True,
+    default=True,
+)
+def evaluate(
+    predictions_path: str, batch_size: int, use_additional_metrics: bool
+) -> dict:
     """
     Simple script for running evaluation on the LingoQA benchmark.
 
     Args:
         predictions_path: path to a .csv file containing the model predictions.
         batch_size: batch size for evaluation.
+        use_additional_metrics: whether to compute BLEU, METEOR, and CIDEr metrics.
     Out:
-        benchmark_score: evaluation score obtained from running the textual classifier on the benchmark.
+        results: dictionary containing Lingo-Judge score and optionally BLEU, METEOR, CIDEr scores.
     """
     references = pd.read_parquet(LINGOQA_TEST)
     # Use enum .value (string) for DataFrame column operations to avoid Enum
@@ -62,6 +72,7 @@ def evaluate(predictions_path: str, batch_size: int) -> float:
 
     dataset = Dataset.from_pandas(merged)
 
+    # Evaluate with Lingo-Judge
     judge = LingoJudge().eval().to("cuda:0")
     dataset_evaluated = dataset.map(
         partial(evaluate_question, judge), batched=True, batch_size=batch_size
@@ -69,8 +80,59 @@ def evaluate(predictions_path: str, batch_size: int) -> float:
     dataset_filtered = dataset_evaluated.filter(select_correct)
 
     benchmark_score = dataset_filtered.num_rows / dataset_evaluated.num_rows
-    print(f"The overall benchmark score is {benchmark_score*100}%")
-    return benchmark_score
+    print(f"\n{'='*60}")
+    print(f"EVALUATION RESULTS")
+    print(f"{'='*60}")
+    print(f"Lingo-Judge Accuracy: {benchmark_score*100:.2f}%")
+
+    results = {
+        "lingo_judge_accuracy": benchmark_score,
+        "lingo_judge_correct": dataset_filtered.num_rows,
+        "total_examples": dataset_evaluated.num_rows,
+    }
+
+    # Compute additional metrics if requested
+    if use_additional_metrics:
+        print(f"\nComputing additional metrics (BLEU, METEOR, CIDEr)...")
+        additional_metrics = AdditionalMetrics()
+
+        # Extract references and predictions from the dataset
+        references = dataset_evaluated[Keys.references.value]
+        predictions = dataset_evaluated[Keys.prediction.value]
+
+        # Compute all metrics
+        metric_scores = additional_metrics.compute_all(references, predictions)
+
+        # Add scores to dataset
+        dataset_with_metrics = dataset_evaluated.add_column(
+            Keys.bleu.value, metric_scores["bleu"]
+        )
+        dataset_with_metrics = dataset_with_metrics.add_column(
+            Keys.meteor.value, metric_scores["meteor"]
+        )
+        dataset_with_metrics = dataset_with_metrics.add_column(
+            Keys.cider.value, metric_scores["cider"]
+        )
+
+        # Calculate average scores
+        avg_bleu = sum(metric_scores["bleu"]) / len(metric_scores["bleu"])
+        avg_meteor = sum(metric_scores["meteor"]) / len(metric_scores["meteor"])
+        avg_cider = sum(metric_scores["cider"]) / len(metric_scores["cider"])
+
+        print(f"\nAverage BLEU:   {avg_bleu:.4f}")
+        print(f"Average METEOR: {avg_meteor:.4f}")
+        print(f"Average CIDEr:  {avg_cider:.4f}")
+
+        results.update({"bleu": avg_bleu, "meteor": avg_meteor, "cider": avg_cider})
+
+        # Optionally save detailed results with all metrics
+        output_path = predictions_path.replace(".csv", "_detailed_results.csv")
+        dataset_with_metrics.to_csv(output_path)
+        print(f"\nDetailed results saved to: {output_path}")
+
+    print(f"{'='*60}\n")
+
+    return results
 
 
 def evaluate_question(metric: LingoJudge, data_dict: dict) -> dict:
