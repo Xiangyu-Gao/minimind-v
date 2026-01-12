@@ -2,10 +2,16 @@ import json
 import os
 import cv2
 import pandas as pd
+import sys
+
+# Ensure repo root is on sys.path so `benchmark` package can be imported when
+# running this script from the `scripts/` directory.
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from tqdm import tqdm
 from googletrans import Translator
 from utils import safe_translate
+from benchmark.constants import Keys
 
 
 # =========================
@@ -26,12 +32,12 @@ def cached_translate(text):
 # =========================
 # Config
 # =========================
-subset = "Action"
-mode = "train"
+# subset = "Action"
+# mode = "train"
 # subset = "Scenery"
 # mode = "train"
-# subset = "Evaluation"
-# mode = "val"
+subset = "Evaluation"
+mode = "val"
 
 base_path = f"/mnt/sdb/Download_data/LingoQA/{subset}"
 image_base_path = os.path.join(base_path, "images", mode)
@@ -49,7 +55,24 @@ os.makedirs(save_image_path, exist_ok=True)
 # Load parquet & group
 # =========================
 print("Loading parquet...")
-df = pd.read_parquet(parquet_file_path, engine="pyarrow")
+df = pd.read_parquet(parquet_file_path)
+
+# Use enum .value (string) for DataFrame column operations to avoid Enum
+# objects becoming column labels (which show up as `Keys.xxx`).
+df = df[
+    [
+        Keys.question_id.value,
+        Keys.segment_id.value,
+        Keys.question.value,
+        Keys.answer.value,
+    ]
+]
+
+df = (
+    df.groupby([Keys.question_id.value, Keys.segment_id.value, Keys.question.value])
+    .agg(list)
+    .reset_index()
+)
 
 # Group once (BIG speedup)
 df_groups = dict(tuple(df.groupby("segment_id")))
@@ -109,7 +132,11 @@ with open(save_jsonl_path, "w", encoding="utf-8") as fout, open(
             question_id = row["question_id"]
 
             question_ch = cached_translate(question_eng)
-            answer_ch = cached_translate(answer_eng)
+            if isinstance(answer_eng, str):
+                answer_ch = cached_translate(answer_eng)
+            elif isinstance(answer_eng, list):
+                # for evaluation set where multiple answers exist
+                answer_ch = [cached_translate(a) for a in answer_eng]
 
             jsonl_entry = {
                 "conversations": [

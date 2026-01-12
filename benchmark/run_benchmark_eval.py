@@ -20,6 +20,16 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 warnings.filterwarnings("ignore")
 
 
+def load_jsonl_data(jsonl_path):
+    """Load data from a JSONL file."""
+    data = []
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            item = json.loads(line.strip())
+            data.append(item)
+    return data
+
+
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if "model" in args.load_from:
@@ -150,19 +160,13 @@ def main():
     # 自动测试data_path中的所有test case
 
     # Load test jsonl data
-    json_data = []
-    with open(args.data_path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            data = json.loads(line.strip())
-            json_data.append(data)
-
+    json_data = load_jsonl_data(args.data_path)
     # Load test jsonl mapping data
-    mapping_data = {}
-    mapping_jsonl_path = args.data_path.replace(".jsonl", "_mapping.jsonl")
-    with open(mapping_jsonl_path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            data = json.loads(line.strip())
-            mapping_data.update(data)
+    mapping_data = load_jsonl_data(args.data_path.replace(".jsonl", "_mapping.jsonl"))
+
+    assert (
+        len(json_data) == len(mapping_data)
+    ), f"数据与映射长度不匹配！, 数据长度: {len(json_data)}, 映射长度: {len(mapping_data)}"
 
     # Iterate through each QA pair and generate responses
     # Record the predictions with the columns question_id, segment_id and answer
@@ -212,8 +216,9 @@ def main():
         generated_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
         response = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-        question_id = mapping_data.get(str(idx), {}).get("question_id", "")
-        segment_id = mapping_data.get(str(idx), {}).get("segment_id", "")
+        question_id = mapping_data[idx]["question_id"]
+        segment_id = mapping_data[idx]["segment_id"]
+
         predictions.append(
             {
                 "question_id": question_id,
@@ -238,8 +243,8 @@ def main():
     predictions_df.to_csv(predictions_csv_path, index=False, encoding="utf-8-sig")
     print(f"Predictions saved to {predictions_csv_path}")
 
-    # Evaluate the predictions
-    evaluate(predictions_csv_path, batch_size=16)
+    # Evaluate the predictions (call the click-wrapped function's callback directly)
+    evaluate.callback(predictions_csv_path, 16)
 
 
 if __name__ == "__main__":
