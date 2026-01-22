@@ -10,3 +10,4 @@ MiniMind2-V
 model/vision_model
 ckpt_store/
 *.csv
+qwen3_lora_output/

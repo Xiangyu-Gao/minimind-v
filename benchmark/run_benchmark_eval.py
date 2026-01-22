@@ -7,28 +7,22 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import argparse
 import warnings
 import torch
-import json
-import pandas as pd
 
 from PIL import Image
 from trainer.trainer_utils import setup_seed
 from model.model_vlm import MiniMindVLM, VLMConfig
-from benchmark.evaluate import evaluate
-from scripts.utils import safe_translate
+from benchmark.bench_utils import (
+    add_common_args,
+    init_translator,
+    translate_response,
+    load_eval_data,
+    collect_prediction,
+    export_and_evaluate,
+)
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 
 warnings.filterwarnings("ignore")
-
-
-def load_jsonl_data(jsonl_path):
-    """Load data from a JSONL file."""
-    data = []
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            item = json.loads(line.strip())
-            data.append(item)
-    return data
 
 
 def init_model(args):
@@ -114,14 +108,6 @@ def main():
         help="是否使用MoE架构（0=否，1=是）",
     )
     parser.add_argument(
-        "--use_single_image",
-        default=0,
-        type=int,
-        choices=[0, 1],
-        help="是否使用单图像模式（0=否，1=是）",
-    )
-    parser.add_argument("--max_new_tokens", default=512, type=int, help="最大生成长度")
-    parser.add_argument(
         "--temperature",
         default=0.65,
         type=float,
@@ -130,68 +116,28 @@ def main():
     parser.add_argument(
         "--top_p", default=0.85, type=float, help="nucleus采样阈值（0-1）"
     )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="../dataset/LingoQA_Evaluation_data.jsonl",
-        help="测试数据路径",
+
+    # Common benchmark args
+    add_common_args(parser)
+    # Override defaults for this script's path convention
+    parser.set_defaults(
+        data_path="../dataset/LingoQA_Evaluation_data.jsonl",
+        image_dir="../dataset/LingoQA_Evaluation_images",
+        dump_eval_dir="../benchmark/output",
     )
-    parser.add_argument(
-        "--image_dir",
-        type=str,
-        default="../dataset/LingoQA_Evaluation_images",
-        help="测试图像目录",
-    )
-    parser.add_argument(
-        "--dump_eval_dir",
-        type=str,
-        default="../benchmark/output",
-        help="Eval output directory",
-    )
-    parser.add_argument(
-        "--device",
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        type=str,
-        help="运行设备",
-    )
-    parser.add_argument(
-        "--language",
-        default="english",
-        type=str,
-        choices=["english", "chinese"],
-        help="输出语言（english=英文，chinese=中文），默认英文以匹配LingoQA基准测试",
-    )
+
     args = parser.parse_args()
 
-    # Initialize translator if needed for language conversion
-    translator = None
-    if args.language == "english":
-        try:
-            from googletrans import Translator
-
-            translator = Translator()
-            print("Translator initialized for Chinese -> English conversion")
-        except ImportError:
-            print(
-                "Warning: googletrans not installed. Run: pip install googletrans==4.0.0-rc1"
-            )
-            print("Predictions will be kept in their original language.")
+    # Initialize translator
+    translator, backend = init_translator(args.language, backend="googletrans")
 
     model, tokenizer, preprocess = init_model(args)
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-    # 自动测试data_path中的所有test case
 
-    # Load test jsonl data
-    json_data = load_jsonl_data(args.data_path)
-    # Load test jsonl mapping data
-    mapping_data = load_jsonl_data(args.data_path.replace(".jsonl", "_mapping.jsonl"))
-
-    assert (
-        len(json_data) == len(mapping_data)
-    ), f"数据与映射长度不匹配！, 数据长度: {len(json_data)}, 映射长度: {len(mapping_data)}"
+    # Load test data
+    json_data, mapping_data = load_eval_data(args.data_path)
 
     # Iterate through each QA pair and generate responses
-    # Record the predictions with the columns question_id, segment_id and answer
     predictions = []
 
     for idx, qa_pair in enumerate(json_data):
@@ -239,39 +185,13 @@ def main():
         response = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         # Translate response if language is set to English
-        if args.language == "english" and translator is not None:
-            response = safe_translate(translator, response, src="zh-cn", dest="en")
-            print(f"📝 Translated to English: {response}\n")
+        if args.language == "english":
+            response = translate_response(response, translator, backend)
 
-        question_id = mapping_data[idx]["question_id"]
-        segment_id = mapping_data[idx]["segment_id"]
+        predictions.append(collect_prediction(mapping_data, idx, response))
 
-        predictions.append(
-            {
-                "question_id": question_id,
-                "segment_id": segment_id,
-                "answer": response,
-            }
-        )
-
-    # Export predictions to a predictions.csv file
-    if os.path.exists(args.dump_eval_dir) is False:
-        os.makedirs(args.dump_eval_dir)
-
-    predictions_csv_path = os.path.join(
-        args.dump_eval_dir,
-        os.path.basename(args.data_path).replace(
-            ".jsonl", f"_predictions_{args.weight}.csv"
-        ),
-    )
-
-    predictions_df = pd.DataFrame(predictions)
-
-    predictions_df.to_csv(predictions_csv_path, index=False, encoding="utf-8-sig")
-    print(f"Predictions saved to {predictions_csv_path}")
-
-    # Evaluate the predictions (call the click-wrapped function's callback directly)
-    evaluate.callback(predictions_csv_path, 16, True)
+    # Export and evaluate
+    export_and_evaluate(predictions, args.dump_eval_dir, args.data_path, args.weight)
 
 
 if __name__ == "__main__":
